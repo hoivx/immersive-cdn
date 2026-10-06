@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # Rebuilds the Immersive local catalog from the Strapi API.
 #
-#   API_TOKEN=… CDN_BASE=https://cdn.jsdelivr.net/gh/<user>/immersive-cdn@v1.0.0 ./scripts/build.sh
+#   API_TOKEN=… CDN_OWNER=<github user> CDN_TAG=v1.0.0 ./scripts/build.sh
 #
 # 1. Snapshots GET /api/videos (all pages) into data/videos_api_snapshot.json.
 # 2. For every record:
 #      - has media on the API  → download, re-encode to H.264/AAC (the API serves HEVC and AV1);
 #      - no media on the API   → take the mp4/jpg from nhat120904/immersive-cdn, matched by title.
 #    Every output is checked: h264 + yuv420p, moov before mdat, ≤ 20 MB (jsDelivr per-file cap).
-# 3. Writes out/catalog_videos.json and out/catalog_tabs.json for the app bundle.
+# 3. Packs records into ≤ 45 MB shards (scripts/shard.py → data/shards.json): jsDelivr
+#    rejects GitHub repos over 50 MB, so each shard is its own repo immersive-cdn-NN.
+# 4. Writes out/catalog_videos.json and out/catalog_tabs.json for the app bundle.
 #
 # The token is only read from the environment; it is never written to disk.
 set -euo pipefail
 
 : "${API_TOKEN:?API_TOKEN is required}"
-: "${CDN_BASE:?CDN_BASE is required, e.g. https://cdn.jsdelivr.net/gh/<user>/immersive-cdn@v1.0.0}"
+: "${CDN_OWNER:?CDN_OWNER (GitHub user owning immersive-cdn-NN) is required}"
+CDN_TAG="${CDN_TAG:-v1.0.0}"
 API_HOST="${API_HOST:-https://immersive.var-meta.com}"
 REF_JSON="${REF_JSON:-https://raw.githubusercontent.com/nhat120904/immersive-cdn/main/data.json}"
 MAX_BYTES=$((20 * 1024 * 1024))
@@ -95,11 +98,16 @@ for f in thumbnails/*.jpg; do
 done
 [ "$fail" = 0 ] || exit 1
 
-# ---------------------------------------------------------------- 3. app JSON
+# ---------------------------------------------------------------- 3. shards
+echo "▸ shards"
+python3 scripts/shard.py
+
+# ---------------------------------------------------------------- 4. app JSON
 echo "▸ catalog_videos.json"
-jq --arg cdn "$CDN_BASE" '
+jq --arg owner "$CDN_OWNER" --arg tag "$CDN_TAG" --slurpfile shards data/shards.json '
+  def cdn: "https://cdn.jsdelivr.net/gh/\($owner)/immersive-cdn-\($shards[0][.documentId])@\($tag)";
   {
-    data: [ .[] | {
+    data: [ .[] | cdn as $cdn | {
       documentId, video_title, topic_name, video_type, video_format,
       download, calories, mode, difficulty_level,
       thumb_name: {
