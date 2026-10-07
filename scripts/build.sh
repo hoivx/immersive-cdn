@@ -122,10 +122,19 @@ jq --arg owner "$CDN_OWNER" --arg tag "$CDN_TAG" --slurpfile shards data/shards.
   }' data/videos_api_snapshot.json > out/catalog_videos.json
 
 echo "▸ catalog_tabs.json"
+# Every workout record needs a category in data/workout_categories.json (assigned by
+# watching the video — titles are nearly all "Immersive Interactive Warm-Up"). A new
+# record without one would silently sit in "All" only, so it fails the build instead.
+missing=$(jq -r --slurpfile cats data/workout_categories.json '
+  .[] | select(.topic_name == "warmup" or .topic_name == "exercises")
+      | select($cats[0][.documentId] == null) | .documentId' data/videos_api_snapshot.json)
+[ -z "$missing" ] || { echo "✗ no workout category for: $missing"; exit 1; }
+
 # Chip ids are exactly what CatalogViewModel sends; see the app's LocalContentRepository.
-jq '
+jq --slurpfile cats data/workout_categories.json '
   def ids(f): [ .[] | select(f) | .documentId ];
-  {
+  . as $all
+  | {
     trending: {
       "Trending":  ids(.topic_name == "challenge" or .topic_name == "Trending"),
       "Finger In": ids(.topic_name == "fingerin"),
@@ -136,11 +145,13 @@ jq '
       duo:    ids(.mode == "duo"),
       squad:  ids(.mode == "squad")
     },
-    workout: {
-      "":           ids(.topic_name == "warmup" or .topic_name == "exercises"),
-      "Strength":   [], "Cardio": [], "Yoga": [], "HIIT": [],
-      "Stretching": [], "Dance":  [], "Full Body": []
-    }
+    workout: ({
+      "": ids(.topic_name == "warmup" or .topic_name == "exercises")
+    } + (
+      ["Strength", "Cardio", "Yoga", "HIIT", "Stretching", "Dance", "Full Body"]
+      | map(. as $c | { key: $c, value: [ $all[] | select(($cats[0][.documentId] // []) | index($c)) | .documentId ] })
+      | from_entries
+    ))
   }' data/videos_api_snapshot.json > out/catalog_tabs.json
 
 jq -c '{trending: (.trending|map_values(length)), challenge: (.challenge|map_values(length)), workout: (.workout|map_values(length))}' out/catalog_tabs.json
